@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#1a2a1a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Kütüphanem" />
+  <meta name="description" content="Kişisel kütüphane yönetim uygulaması" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Source+Sans+3:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <title>Kütüphanem</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+    body { background: #141e14; font-family: 'Source Sans 3', sans-serif; color: #e8dcc8; -webkit-tap-highlight-color: transparent; }
+    input, button, textarea { font-family: inherit; }
+    input[type="file"] { display: none; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a3a2a; border-radius: 4px; }
+
+    /* QR Scanner Modal */
+    .qr-modal-overlay { position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.9); z-index: 200; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    .qr-modal-header { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 400px; padding: 12px 16px; }
+    .qr-modal-title { font-family: 'Playfair Display', serif; color: #c8a96e; font-size: 18px; }
+    .qr-modal-close { background: #2a3a2a; border: none; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #e8dcc8; font-size: 20px; }
+    #qr-reader { width: 100%; max-width: 400px; border-radius: 12px; overflow: hidden; }
+    #qr-reader video { border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Dependencies -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script crossorigin src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <script crossorigin src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+  <script crossorigin src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ─── SVG Icon Component using Lucide ───
+    function Icon({ name, size = 24, color = "currentColor", strokeWidth = 1.8, style: extraStyle }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (!ref.current || !lucide.icons[name]) return;
+        const iconData = lucide.icons[name];
+        const [, attrs, children] = iconData;
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("width", size);
+        svg.setAttribute("height", size);
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("fill", "none");
+        svg.setAttribute("stroke", color);
+        svg.setAttribute("stroke-width", strokeWidth);
+        svg.setAttribute("stroke-linecap", "round");
+        svg.setAttribute("stroke-linejoin", "round");
+        svg.innerHTML = children.map(([tag, attrs]) => {
+          const el = `<${tag} ${Object.entries(attrs).map(([k,v]) => `${k}="${v}"`).join(' ')} />`;
+          return el;
+        }).join('');
+        ref.current.innerHTML = '';
+        ref.current.appendChild(svg);
+      }, [name, size, color, strokeWidth]);
+      return <span ref={ref} style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, ...extraStyle }} />;
+    }
+
+    // ─── QR Code Component (real scannable) ───
+    function QRCodeSVG({ text, size = 140 }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (!ref.current) return;
+        try {
+          const qr = qrcode(0, 'M');
+          qr.addData(text);
+          qr.make();
+          ref.current.innerHTML = qr.createSvgTag({ cellSize: size / qr.getModuleCount(), margin: 0 });
+          const svg = ref.current.querySelector('svg');
+          if (svg) { svg.setAttribute('width', size); svg.setAttribute('height', size); }
+        } catch(e) { console.error('QR error:', e); }
+      }, [text, size]);
+      return <div ref={ref} style={{ width: size, height: size, background: 'white', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }} />;
+    }
+
+    // ─── Storage (localStorage) ───
+    function loadData(key, fallback) {
+      try {
+        const d = localStorage.getItem(key);
+        return d ? JSON.parse(d) : fallback;
+      } catch { return fallback; }
+    }
+    function saveData(key, data) {
+      try { localStorage.setItem(key, JSON.stringify(data)); } catch(e) { console.error(e); }
+    }
+
+    // ─── Generate unique library ID ───
+    function generateLibraryId(existingIds) {
+      let id;
+      do {
+        const num = Math.floor(1000 + Math.random() * 9000);
+        id = `KTP-${new Date().getFullYear()}-${num}`;
+      } while (existingIds.includes(id));
+      return id;
+    }
+
+    // ─── Unique count helper ───
+    function uniqCount(arr, key) {
+      const s = new Set(arr.map(a => a[key]).filter(Boolean));
+      return s.size;
+    }
+
+    // ═══════════════════════ MAIN APP ═══════════════════════
+    function App() {
+      const [view, setView] = useState("home");
+      const [books, setBooks] = useState([]);
+      const [lendings, setLendings] = useState([]);
+      const [selectedBook, setSelectedBook] = useState(null);
+      const [searchQuery, setSearchQuery] = useState("");
+      const [searchFilter, setSearchFilter] = useState("all");
+      const [loading, setLoading] = useState(true);
+      const [toast, setToast] = useState(null);
+      const [editingBook, setEditingBook] = useState(null);
+      const [showLendForm, setShowLendForm] = useState(false);
+      const [importPreview, setImportPreview] = useState(null);
+
+      useEffect(() => {
+        const b = loadData("library-books", []);
+        const l = loadData("library-lendings", []);
+        setBooks(b); setLendings(l); setLoading(false);
+      }, []);
+
+      useEffect(() => { if (!loading) saveData("library-books", books); }, [books, loading]);
+      useEffect(() => { if (!loading) saveData("library-lendings", lendings); }, [lendings, loading]);
+
+      const showToast = (msg, type = "success") => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 3000);
+      };
+
+      const navigateTo = (v, book = null) => {
+        setView(v);
+        if (book) setSelectedBook(book);
+        if (v !== "bookDetail") setSelectedBook(null);
+      };
+
+      const activeLen = lendings.filter(l => !l.returned);
+      const overdueLen = lendings.filter(l => !l.returned && new Date(l.dueDate) < new Date());
+
+      if (loading) return (
+        <div style={S.loadingScreen}>
+          <Icon name="book-open" size={48} color="#c8a96e" />
+          <p style={{ color: "#c8a96e", marginTop: 16, fontFamily: "'Playfair Display', serif" }}>Kütüphane yükleniyor...</p>
+        </div>
+      );
+
+      return (
+        <div style={S.app}>
+          {toast && (
+            <div style={{ ...S.toast, background: toast.type === "success" ? "#2d5a2d" : "#8b2e2e", animation: "fadeIn 0.3s ease" }}>
+              <Icon name={toast.type === "success" ? "check-circle" : "alert-circle"} size={16} color="#e8dcc8" />
+              <span>{toast.msg}</span>
+            </div>
+          )}
+
+          <header style={S.header}>
+            {view !== "home" && (
+              <button style={S.backBtn} onClick={() => {
+                if (view === "bookDetail") navigateTo("books");
+                else navigateTo("home");
+              }}>
+                <Icon name="chevron-left" size={22} color="#c8a96e" />
+              </button>
+            )}
+            <div style={S.headerTitle}>
+              <Icon name="book-open" size={20} color="#c8a96e" />
+              <span style={S.headerText}>
+                {view === "home" ? "Kütüphanem" : view === "books" ? "Kitaplar" :
+                  view === "addBook" ? (editingBook ? "Kitap Düzenle" : "Yeni Kitap") :
+                  view === "bookDetail" ? "Kitap Detay" : view === "lending" ? "Ödünç Verme" :
+                  view === "importExport" ? "İçe/Dışa Aktar" : "Kütüphanem"}
+              </span>
+            </div>
+          </header>
+
+          <main style={S.main}>
+            {view === "home" && <HomeView books={books} lendings={lendings} activeLen={activeLen} overdueLen={overdueLen} navigateTo={navigateTo} />}
+            {view === "books" && <BooksView books={books} lendings={lendings} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchFilter={searchFilter} setSearchFilter={setSearchFilter} navigateTo={navigateTo} setSelectedBook={setSelectedBook} setView={setView} showToast={showToast} />}
+            {view === "addBook" && <AddBookView books={books} setBooks={setBooks} editingBook={editingBook} setEditingBook={setEditingBook} navigateTo={navigateTo} showToast={showToast} />}
+            {view === "bookDetail" && selectedBook && <BookDetailView book={selectedBook} books={books} setBooks={setBooks} lendings={lendings} setLendings={setLendings} navigateTo={navigateTo} showToast={showToast} setEditingBook={setEditingBook} setView={setView} showLendForm={showLendForm} setShowLendForm={setShowLendForm} />}
+            {view === "lending" && <LendingView lendings={lendings} setLendings={setLendings} books={books} navigateTo={navigateTo} showToast={showToast} />}
+            {view === "importExport" && <ImportExportView books={books} setBooks={setBooks} lendings={lendings} showToast={showToast} importPreview={importPreview} setImportPreview={setImportPreview} />}
+          </main>
+
+          <nav style={S.bottomNav}>
+            {[
+              { id: "home", icon: "home", label: "Ana Sayfa" },
+              { id: "books", icon: "library", label: "Kitaplar" },
+              { id: "addBook", icon: "plus", label: "Ekle", big: true },
+              { id: "lending", icon: "user-check", label: "Ödünç" },
+              { id: "importExport", icon: "file-spreadsheet", label: "Excel" },
+            ].map(tab => (
+              <button key={tab.id} style={{ ...S.navBtn, ...(view === tab.id ? S.navBtnActive : {}) }}
+                onClick={() => { setEditingBook(null); navigateTo(tab.id); }}>
+                <Icon name={tab.icon} size={tab.big ? 26 : 20} color={view === tab.id ? "#c8a96e" : "#7a8a7a"} strokeWidth={tab.big ? 2.5 : 1.8} />
+                <span style={{ ...S.navLabel, color: view === tab.id ? "#c8a96e" : "#7a8a7a" }}>{tab.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      );
+    }
+
+    // ═══════════════════════ HOME VIEW ═══════════════════════
+    function HomeView({ books, lendings, activeLen, overdueLen, navigateTo }) {
+      return (
+        <div style={S.viewContainer}>
+          <div style={S.welcomeBanner}>
+            <h2 style={S.welcomeTitle}>Hoş Geldiniz</h2>
+            <p style={S.welcomeSub}>Kütüphane yönetim sisteminiz</p>
+          </div>
+
+          <div style={S.statsGrid}>
+            {[
+              { icon: "book-marked", label: "Toplam Kitap", value: books.length, color: "#4a9e6e" },
+              { icon: "user-check", label: "Ödünç Verilen", value: activeLen.length, color: "#c8a96e" },
+              { icon: "alert-circle", label: "Geciken", value: overdueLen.length, color: "#c45c5c" },
+              { icon: "globe", label: "Farklı Dil", value: uniqCount(books, "language"), color: "#5a8abf" },
+            ].map((s, i) => (
+              <div key={i} style={S.statCard}>
+                <Icon name={s.icon} size={24} color={s.color} />
+                <span style={S.statValue}>{s.value}</span>
+                <span style={S.statLabel}>{s.label}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={S.quickActions}>
+            <h3 style={S.sectionTitle}>Hızlı İşlemler</h3>
+            <div style={S.actionGrid}>
+              {[
+                { icon: "plus", label: "Kitap Ekle", view: "addBook", bg: "#2d5a2d" },
+                { icon: "search", label: "Kitap Ara", view: "books", bg: "#3d4d5d" },
+                { icon: "qr-code", label: "QR Tara", view: "books", bg: "#3d5a4d" },
+                { icon: "download", label: "Excel İndir", view: "importExport", bg: "#5a3d2d" },
+                { icon: "user-check", label: "Ödünç Ver", view: "lending", bg: "#4d3d5d" },
+              ].map((a, i) => (
+                <button key={i} style={{ ...S.actionBtn, background: a.bg }} onClick={() => navigateTo(a.view)}>
+                  <Icon name={a.icon} size={22} color="#e8dcc8" />
+                  <span style={S.actionLabel}>{a.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {activeLen.length > 0 && (
+            <div style={S.section}>
+              <h3 style={S.sectionTitle}>Aktif Ödünç İşlemleri</h3>
+              {activeLen.slice(0, 3).map(l => (
+                <div key={l.id} style={{ ...S.lendingCard, borderLeft: new Date(l.dueDate) < new Date() ? "3px solid #c45c5c" : "3px solid #c8a96e" }}>
+                  <span style={S.lendBookName}>{l.bookName}</span>
+                  <span style={S.lendBorrower}>{l.borrowerName} • {l.dueDate}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════ BOOKS VIEW (with live QR scanner) ═══════════════════════
+    function BooksView({ books, lendings, searchQuery, setSearchQuery, searchFilter, setSearchFilter, navigateTo, setSelectedBook, setView, showToast }) {
+      const [showQRScanner, setShowQRScanner] = useState(false);
+      const scannerRef = useRef(null);
+
+      const startQRScanner = () => { setShowQRScanner(true); };
+
+      const stopQRScanner = () => {
+        if (scannerRef.current) {
+          scannerRef.current.stop().catch(() => {});
+          scannerRef.current.clear();
+          scannerRef.current = null;
+        }
+        setShowQRScanner(false);
+      };
+
+      useEffect(() => {
+        if (!showQRScanner) return;
+        const scanner = new Html5Qrcode("qr-reader");
+        scannerRef.current = scanner;
+        scanner.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: { width: 250, height: 250 } },
+          (decodedText) => {
+            // Found QR code!
+            scanner.stop().then(() => {
+              scanner.clear();
+              scannerRef.current = null;
+              setShowQRScanner(false);
+              const found = books.find(b => b.libraryId && b.libraryId.toLowerCase() === decodedText.toLowerCase());
+              if (found) {
+                showToast("Kitap bulundu: " + found.name);
+                setSelectedBook(found);
+                setView("bookDetail");
+              } else {
+                showToast("QR okundu: " + decodedText);
+                setSearchQuery(decodedText);
+                setSearchFilter("libraryId");
+              }
+            }).catch(() => {});
+          },
+          () => {} // ignore errors during scan
+        ).catch(err => {
+          showToast("Kamera açılamadı: " + err, "error");
+          setShowQRScanner(false);
+        });
+
+        return () => {
+          scanner.stop().catch(() => {});
+          scanner.clear();
+        };
+      }, [showQRScanner]);
+
+      const filtered = books.filter(b => {
+        const q = searchQuery.toLowerCase();
+        if (!q) return true;
+        if (searchFilter === "all") return (
+          b.name?.toLowerCase().includes(q) || b.author?.toLowerCase().includes(q) ||
+          b.publisher?.toLowerCase().includes(q) || b.libraryId?.toLowerCase().includes(q) ||
+          b.shelfNo?.toLowerCase().includes(q)
+        );
+        return b[searchFilter]?.toString().toLowerCase().includes(q);
+      });
+
+      return (
+        <div style={S.viewContainer}>
+          {/* QR Scanner Modal */}
+          {showQRScanner && (
+            <div className="qr-modal-overlay">
+              <div className="qr-modal-header">
+                <span className="qr-modal-title">QR Kod Tara</span>
+                <button className="qr-modal-close" onClick={stopQRScanner}>✕</button>
+              </div>
+              <div id="qr-reader" style={{ marginTop: 16 }}></div>
+              <p style={{ color: '#9aaa9a', fontSize: 13, marginTop: 16, textAlign: 'center', padding: '0 20px' }}>
+                Kitabın QR kodunu kameraya gösterin
+              </p>
+            </div>
+          )}
+
+          <div style={S.searchBox}>
+            <Icon name="search" size={18} color="#7a8a7a" />
+            <input style={S.searchInput} placeholder="Kitap ara..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+            {searchQuery && <button style={S.clearBtn} onClick={() => setSearchQuery("")}><Icon name="x" size={16} color="#7a8a7a" /></button>}
+            <button style={S.qrScanBtn} onClick={startQRScanner}>
+              <Icon name="qr-code" size={18} color="#c8a96e" />
+            </button>
+          </div>
+
+          <div style={S.filterRow}>
+            {[
+              { key: "all", label: "Tümü" }, { key: "name", label: "Ad" },
+              { key: "author", label: "Yazar" }, { key: "shelfNo", label: "Raf" },
+              { key: "libraryId", label: "ID" },
+            ].map(f => (
+              <button key={f.key} style={{ ...S.filterChip, ...(searchFilter === f.key ? S.filterChipActive : {}) }}
+                onClick={() => setSearchFilter(f.key)}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          <p style={S.resultCount}>{filtered.length} kitap bulundu</p>
+
+          {filtered.length === 0 ? (
+            <div style={S.emptyState}>
+              <Icon name="book-open" size={40} color="#5a6a5a" />
+              <p>Kitap bulunamadı</p>
+            </div>
+          ) : (
+            <div style={S.bookList}>
+              {filtered.map(book => {
+                const isLent = lendings.some(l => l.bookId === book.id && !l.returned);
+                return (
+                  <div key={book.id} style={S.bookCard} onClick={() => { setSelectedBook(book); setView("bookDetail"); }}>
+                    <div style={S.bookThumb}>
+                      {book.photo ? <img src={book.photo} alt="" style={S.bookThumbImg} /> : <Icon name="book-open" size={24} color="#5a6a5a" />}
+                    </div>
+                    <div style={S.bookInfo}>
+                      <span style={S.bookName}>{book.name || "İsimsiz"}</span>
+                      <span style={S.bookAuthor}>{book.author || "Bilinmeyen Yazar"}</span>
+                      <div style={S.bookMeta}>
+                        <span style={S.bookMetaItem}><Icon name="hash" size={11} color="#5a6a5a" />{book.libraryId}</span>
+                        <span style={S.bookMetaItem}><Icon name="archive" size={11} color="#5a6a5a" />Raf {book.shelfNo || "-"}</span>
+                      </div>
+                    </div>
+                    {isLent && <span style={S.lentBadge}>Ödünç</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════ ADD BOOK VIEW ═══════════════════════
+    function AddBookView({ books, setBooks, editingBook, setEditingBook, navigateTo, showToast }) {
+      const [form, setForm] = useState(editingBook || {
+        name: "", author: "", publisher: "", year: "", language: "Türkçe",
+        entryYear: new Date().getFullYear().toString(), shelfNo: "", photo: null,
+      });
+      const [ocrLoading, setOcrLoading] = useState(false);
+      const fileRef = useRef(null);
+      const cameraRef = useRef(null);
+
+      const updateForm = (key, val) => setForm(prev => ({ ...prev, [key]: val }));
+
+      const handlePhoto = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => updateForm("photo", ev.target.result);
+        reader.readAsDataURL(file);
+      };
+
+      const handleOCR = async () => {
+        if (!form.photo) { showToast("Önce fotoğraf yükleyin", "error"); return; }
+        setOcrLoading(true);
+        try {
+          const base64 = form.photo.split(",")[1];
+          const mediaType = form.photo.split(";")[0].split(":")[1] || "image/jpeg";
+          const resp = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [{
+                role: "user",
+                content: [
+                  { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+                  { type: "text", text: 'Bu bir kitap kapağı fotoğrafı. Lütfen şu bilgileri JSON formatında çıkar. Sadece JSON döndür, başka bir şey yazma:\n{"name": "kitap adı", "author": "yazar adı", "publisher": "yayınevi"}\nEğer bir bilgiyi bulamıyorsan boş string "" koy.' }
+                ]
+              }]
+            })
+          });
+          const data = await resp.json();
+          const text = data.content?.map(c => c.text || "").join("").trim() || "";
+          const clean = text.replace(/```json|```/g, "").trim();
+          const parsed = JSON.parse(clean);
+          if (parsed.name) updateForm("name", parsed.name);
+          if (parsed.author) updateForm("author", parsed.author);
+          if (parsed.publisher) updateForm("publisher", parsed.publisher);
+          showToast("Kitap bilgileri fotoğraftan alındı!");
+        } catch (err) {
+          showToast("OCR başarısız. Bilgileri manuel girin.", "error");
+        }
+        setOcrLoading(false);
+      };
+
+      const handleSave = () => {
+        if (!form.name.trim()) { showToast("Kitap adı zorunludur", "error"); return; }
+        if (editingBook) {
+          setBooks(prev => prev.map(b => b.id === editingBook.id ? { ...b, ...form } : b));
+          showToast("Kitap güncellendi!");
+        } else {
+          const existingIds = books.map(b => b.libraryId);
+          const newBook = { ...form, id: Date.now().toString(), libraryId: generateLibraryId(existingIds), createdAt: new Date().toISOString() };
+          setBooks(prev => [newBook, ...prev]);
+          showToast("Kitap eklendi!");
+        }
+        setEditingBook(null);
+        navigateTo("books");
+      };
+
+      const fields = [
+        { key: "name", label: "Kitap Adı *", icon: "book-marked", placeholder: "Kitap adını girin" },
+        { key: "author", label: "Yazar", icon: "user", placeholder: "Yazar adını girin" },
+        { key: "publisher", label: "Yayınevi", icon: "archive", placeholder: "Yayınevi adını girin" },
+        { key: "year", label: "Baskı Yılı", icon: "calendar-days", placeholder: "Ör: 2023", type: "number" },
+        { key: "language", label: "Dil", icon: "globe", placeholder: "Ör: Türkçe" },
+        { key: "entryYear", label: "Kütüphane Giriş Yılı", icon: "clock", placeholder: "Ör: 2024", type: "number" },
+        { key: "shelfNo", label: "Kitaplık Raf No", icon: "hash", placeholder: "Ör: A3-12" },
+      ];
+
+      return (
+        <div style={S.viewContainer}>
+          <div style={S.photoSection}>
+            {form.photo ? (
+              <div style={S.photoPreview}>
+                <img src={form.photo} alt="Kitap" style={S.photoImg} />
+                <button style={S.removePhotoBtn} onClick={() => updateForm("photo", null)}>✕</button>
+              </div>
+            ) : (
+              <div style={S.photoPlaceholder}>
+                <Icon name="image" size={32} color="#5a6a5a" />
+                <span style={{ color: "#7a8a7a", fontSize: 13 }}>Kitap Fotoğrafı</span>
+              </div>
+            )}
+            <div style={S.photoBtns}>
+              <button style={S.photoActionBtn} onClick={() => cameraRef.current?.click()}>
+                <Icon name="camera" size={16} color="#e8dcc8" /> Kamera
+              </button>
+              <button style={S.photoActionBtn} onClick={() => fileRef.current?.click()}>
+                <Icon name="upload" size={16} color="#e8dcc8" /> Galeri
+              </button>
+              {form.photo && (
+                <button style={{ ...S.photoActionBtn, background: "#3d5a3d" }} onClick={handleOCR} disabled={ocrLoading}>
+                  <Icon name="scan-line" size={16} color="#e8dcc8" /> {ocrLoading ? "Okunuyor..." : "OCR"}
+                </button>
+              )}
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} />
+            <input ref={cameraRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} />
+          </div>
+
+          <div style={S.formSection}>
+            {fields.map(field => (
+              <div key={field.key} style={S.formGroup}>
+                <label style={S.formLabel}><Icon name={field.icon} size={14} color="#c8a96e" /> {field.label}</label>
+                <input style={S.formInput} type={field.type || "text"} placeholder={field.placeholder}
+                  value={form[field.key] || ""} onChange={e => updateForm(field.key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+          <button style={S.saveBtn} onClick={handleSave}>{editingBook ? "Güncelle" : "Kaydet"}</button>
+        </div>
+      );
+    }
+
+    // ═══════════════════════ BOOK DETAIL VIEW ═══════════════════════
+    function BookDetailView({ book, books, setBooks, lendings, setLendings, navigateTo, showToast, setEditingBook, setView, showLendForm, setShowLendForm }) {
+      const fileRef = useRef(null);
+      const [lendForm, setLendForm] = useState({ borrowerName: "", dueDate: "" });
+      const activeLending = lendings.find(l => l.bookId === book.id && !l.returned);
+
+      const handlePhotoUpdate = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          setBooks(prev => prev.map(b => b.id === book.id ? { ...b, photo: ev.target.result } : b));
+          showToast("Fotoğraf güncellendi!");
+        };
+        reader.readAsDataURL(file);
+      };
+
+      const handleDelete = () => {
+        if (window.confirm("Bu kitabı silmek istediğinize emin misiniz?")) {
+          setBooks(prev => prev.filter(b => b.id !== book.id));
+          showToast("Kitap silindi!");
+          navigateTo("books");
+        }
+      };
+
+      const handleLend = () => {
+        if (!lendForm.borrowerName.trim() || !lendForm.dueDate) { showToast("Tüm alanları doldurun", "error"); return; }
+        const lending = {
+          id: Date.now().toString(), bookId: book.id, bookName: book.name,
+          libraryId: book.libraryId, borrowerName: lendForm.borrowerName,
+          borrowDate: new Date().toISOString().split("T")[0], dueDate: lendForm.dueDate, returned: false,
+        };
+        setLendings(prev => [lending, ...prev]);
+        setShowLendForm(false);
+        setLendForm({ borrowerName: "", dueDate: "" });
+        showToast("Ödünç kaydı oluşturuldu!");
+      };
+
+      const handleReturn = (id) => {
+        setLendings(prev => prev.map(l => l.id === id ? { ...l, returned: true, returnedDate: new Date().toISOString().split("T")[0] } : l));
+        showToast("Kitap iade edildi!");
+      };
+
+      const detailRows = [
+        { icon: "hash", label: "Kütüphane ID", value: book.libraryId },
+        { icon: "archive", label: "Yayınevi", value: book.publisher || "-" },
+        { icon: "calendar-days", label: "Baskı Yılı", value: book.year || "-" },
+        { icon: "globe", label: "Dil", value: book.language || "-" },
+        { icon: "clock", label: "Giriş Yılı", value: book.entryYear || "-" },
+        { icon: "hash", label: "Raf No", value: book.shelfNo || "-" },
+      ];
+
+      return (
+        <div style={S.viewContainer}>
+          <div style={S.detailPhoto}>
+            {book.photo ? <img src={book.photo} alt="" style={S.detailPhotoImg} /> : (
+              <div style={S.detailPhotoPlaceholder}><Icon name="book-open" size={48} color="#5a6a5a" /></div>
+            )}
+            <button style={S.updatePhotoBtn} onClick={() => fileRef.current?.click()}>
+              <Icon name="camera" size={14} color="#9aaa9a" /> Fotoğraf {book.photo ? "Değiştir" : "Ekle"}
+            </button>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handlePhotoUpdate} />
+          </div>
+
+          <div>
+            <h2 style={S.detailTitle}>{book.name || "İsimsiz"}</h2>
+            <p style={S.detailAuthor}>{book.author || "Bilinmeyen Yazar"}</p>
+
+            <div style={S.detailGrid}>
+              {detailRows.map((item, i) => (
+                <div key={i} style={S.detailRow}>
+                  <span style={S.detailLabel}><Icon name={item.icon} size={13} color="#c8a96e" /> {item.label}</span>
+                  <span style={S.detailValue}>{item.value}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={S.qrSection}>
+              <h3 style={S.sectionTitle}><Icon name="qr-code" size={16} color="#c8a96e" /> QR Kod</h3>
+              <div style={S.qrBox}>
+                <QRCodeSVG text={book.libraryId || book.id} size={160} />
+                <span style={S.qrId}>{book.libraryId}</span>
+              </div>
+            </div>
+
+            {activeLending ? (
+              <div style={S.lendingStatus}>
+                <span style={S.lentStatusText}><Icon name="user-check" size={16} color="#c8a96e" /> Ödünç: {activeLending.borrowerName}</span>
+                <span style={S.lentStatusDate}>İade: {activeLending.dueDate}</span>
+                <button style={S.returnBtn} onClick={() => handleReturn(activeLending.id)}>İade Al</button>
+              </div>
+            ) : !showLendForm && (
+              <button style={S.lendBtn} onClick={() => setShowLendForm(true)}>
+                <Icon name="user-check" size={16} color="#c8a96e" /> Ödünç Ver
+              </button>
+            )}
+
+            {showLendForm && !activeLending && (
+              <div style={S.lendFormBox}>
+                <h4 style={{ color: "#c8a96e", margin: "0 0 12px 0", fontFamily: "'Playfair Display', serif" }}>Ödünç Verme</h4>
+                <input style={S.formInput} placeholder="Ödünç alan kişi" value={lendForm.borrowerName}
+                  onChange={e => setLendForm(p => ({ ...p, borrowerName: e.target.value }))} />
+                <input style={{ ...S.formInput, marginTop: 8 }} type="date" value={lendForm.dueDate}
+                  onChange={e => setLendForm(p => ({ ...p, dueDate: e.target.value }))} />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button style={S.saveBtn} onClick={handleLend}>Onayla</button>
+                  <button style={{ ...S.saveBtn, background: "#5a3a3a" }} onClick={() => setShowLendForm(false)}>İptal</button>
+                </div>
+              </div>
+            )}
+
+            <div style={S.detailActions}>
+              <button style={S.editBtn} onClick={() => { setEditingBook(book); setView("addBook"); }}>
+                <Icon name="edit-3" size={14} color="#e8dcc8" /> Düzenle
+              </button>
+              <button style={S.deleteBtn} onClick={handleDelete}>
+                <Icon name="trash-2" size={14} color="#e8dcc8" /> Sil
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════ LENDING VIEW ═══════════════════════
+    function LendingView({ lendings, setLendings, books, navigateTo, showToast }) {
+      const [tab, setTab] = useState("active");
+      const active = lendings.filter(l => !l.returned);
+      const returned = lendings.filter(l => l.returned);
+      const list = tab === "active" ? active : returned;
+
+      const handleReturn = (id) => {
+        setLendings(prev => prev.map(l => l.id === id ? { ...l, returned: true, returnedDate: new Date().toISOString().split("T")[0] } : l));
+        showToast("Kitap iade edildi!");
+      };
+
+      return (
+        <div style={S.viewContainer}>
+          <div style={S.tabRow}>
+            <button style={{ ...S.tab, ...(tab === "active" ? S.tabActive : {}) }} onClick={() => setTab("active")}>
+              Aktif ({active.length})
+            </button>
+            <button style={{ ...S.tab, ...(tab === "returned" ? S.tabActive : {}) }} onClick={() => setTab("returned")}>
+              İade Edilmiş ({returned.length})
+            </button>
+          </div>
+
+          {list.length === 0 ? (
+            <div style={S.emptyState}>
+              <Icon name="user-check" size={40} color="#5a6a5a" />
+              <p>{tab === "active" ? "Aktif ödünç kaydı yok" : "İade kaydı yok"}</p>
+            </div>
+          ) : (
+            list.map(l => {
+              const isOverdue = !l.returned && new Date(l.dueDate) < new Date();
+              return (
+                <div key={l.id} style={{
+                  ...S.lendingDetailCard,
+                  borderLeft: isOverdue ? "3px solid #c45c5c" : l.returned ? "3px solid #4a9e6e" : "3px solid #c8a96e"
+                }}>
+                  <div style={S.lendingCardTop}>
+                    <span style={S.lendBookTitle}>{l.bookName}</span>
+                    {isOverdue && <span style={S.overdueBadge}>GECİKMİŞ</span>}
+                    {l.returned && <span style={S.returnedBadge}>İADE</span>}
+                  </div>
+                  <span style={S.lendingMeta}><Icon name="user" size={12} color="#7a8a7a" /> {l.borrowerName}</span>
+                  <span style={S.lendingMeta}><Icon name="calendar-days" size={12} color="#7a8a7a" /> {l.borrowDate} → {l.dueDate}</span>
+                  {l.returned && l.returnedDate && (
+                    <span style={S.lendingMeta}><Icon name="check-circle" size={12} color="#4a9e6e" /> İade: {l.returnedDate}</span>
+                  )}
+                  {!l.returned && <button style={S.returnBtn} onClick={() => handleReturn(l.id)}>İade Al</button>}
+                </div>
+              );
+            })
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════ IMPORT/EXPORT VIEW ═══════════════════════
+    function ImportExportView({ books, setBooks, lendings, showToast, importPreview, setImportPreview }) {
+      const importRef = useRef(null);
+
+      const exportBooks = () => {
+        const data = books.map(b => ({
+          "Kütüphane ID": b.libraryId, "Kitap Adı": b.name, "Yazar": b.author,
+          "Yayınevi": b.publisher, "Baskı Yılı": b.year, "Dil": b.language,
+          "Giriş Yılı": b.entryYear, "Raf No": b.shelfNo,
+        }));
+        const ws = XLSX.utils.json_to_sheet(data);
+        ws["!cols"] = [{ wch: 18 }, { wch: 30 }, { wch: 20 }, { wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Kitaplar");
+        XLSX.writeFile(wb, "kutuphane_kitaplar.xlsx");
+        showToast("Excel dosyası indirildi!");
+      };
+
+      const exportLendings = () => {
+        const data = lendings.map(l => ({
+          "Kitap Adı": l.bookName, "Kütüphane ID": l.libraryId, "Ödünç Alan": l.borrowerName,
+          "Ödünç Tarihi": l.borrowDate, "İade Tarihi": l.dueDate,
+          "İade Edildi": l.returned ? "Evet" : "Hayır",
+          "İade Edilme Tarihi": l.returnedDate || "-",
+        }));
+        const ws = XLSX.utils.json_to_sheet(data);
+        ws["!cols"] = [{ wch: 30 }, { wch: 18 }, { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 10 }, { wch: 16 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Ödünç Kayıtları");
+        XLSX.writeFile(wb, "kutuphane_odunc.xlsx");
+        showToast("Ödünç kayıtları indirildi!");
+      };
+
+      const exportTemplate = () => {
+        const template = [{ "Kitap Adı": "", "Yazar": "", "Yayınevi": "", "Baskı Yılı": "", "Dil": "Türkçe", "Giriş Yılı": new Date().getFullYear(), "Raf No": "" }];
+        const ws = XLSX.utils.json_to_sheet(template);
+        ws["!cols"] = [{ wch: 30 }, { wch: 20 }, { wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Şablon");
+        XLSX.writeFile(wb, "kitap_veri_sablonu.xlsx");
+        showToast("Şablon indirildi!");
+      };
+
+      const handleImport = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const wb = XLSX.read(ev.target.result, { type: "array" });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            const data = XLSX.utils.sheet_to_json(ws);
+            const mapped = data.map(row => ({
+              name: row["Kitap Adı"] || row["name"] || "",
+              author: row["Yazar"] || row["author"] || "",
+              publisher: row["Yayınevi"] || row["publisher"] || "",
+              year: row["Baskı Yılı"] || row["year"] || "",
+              language: row["Dil"] || row["language"] || "Türkçe",
+              entryYear: row["Giriş Yılı"] || row["entryYear"] || new Date().getFullYear(),
+              shelfNo: row["Raf No"] || row["shelfNo"] || "",
+            }));
+            setImportPreview(mapped);
+          } catch { showToast("Dosya okunamadı", "error"); }
+        };
+        reader.readAsArrayBuffer(file);
+        e.target.value = "";
+      };
+
+      const confirmImport = () => {
+        const allIds = books.map(b => b.libraryId);
+        const newBooks = importPreview.map((b, i) => ({
+          ...b, id: Date.now().toString() + i,
+          libraryId: generateLibraryId([...allIds]),
+          photo: null, createdAt: new Date().toISOString(),
+        }));
+        setBooks(prev => [...newBooks, ...prev]);
+        setImportPreview(null);
+        showToast(newBooks.length + " kitap içe aktarıldı!");
+      };
+
+      return (
+        <div style={S.viewContainer}>
+          <div style={S.section}>
+            <h3 style={S.sectionTitle}><Icon name="download" size={16} color="#c8a96e" /> Dışa Aktar</h3>
+            <button style={S.excelBtn} onClick={exportBooks}><Icon name="file-spreadsheet" size={18} color="#e8dcc8" /> Kitapları Excel'e Aktar</button>
+            <button style={{ ...S.excelBtn, marginTop: 8 }} onClick={exportLendings}><Icon name="file-spreadsheet" size={18} color="#e8dcc8" /> Ödünç Kayıtlarını Aktar</button>
+            <button style={{ ...S.excelBtn, marginTop: 8, background: "#3d4d3d" }} onClick={exportTemplate}><Icon name="download" size={18} color="#e8dcc8" /> Veri Giriş Şablonu İndir</button>
+          </div>
+
+          <div style={S.section}>
+            <h3 style={S.sectionTitle}><Icon name="upload" size={16} color="#c8a96e" /> İçe Aktar</h3>
+            <p style={{ color: "#9aaa9a", fontSize: 13, marginBottom: 12 }}>Şablona uygun Excel dosyası yükleyin. Kütüphane ID ve QR kodlar otomatik oluşturulur.</p>
+            <button style={S.excelBtn} onClick={() => importRef.current?.click()}><Icon name="upload" size={18} color="#e8dcc8" /> Excel Dosyası Yükle</button>
+            <input ref={importRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} />
+          </div>
+
+          {importPreview && (
+            <div style={S.section}>
+              <h3 style={S.sectionTitle}>Önizleme ({importPreview.length} kitap)</h3>
+              <div style={{ maxHeight: 250, overflow: "auto" }}>
+                {importPreview.map((b, i) => (
+                  <div key={i} style={S.previewRow}>
+                    <span style={S.previewName}>{b.name || "(Adsız)"}</span>
+                    <span style={S.previewMeta}>{b.author} • {b.year}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button style={S.saveBtn} onClick={confirmImport}>İçe Aktar</button>
+                <button style={{ ...S.saveBtn, background: "#5a3a3a" }} onClick={() => setImportPreview(null)}>İptal</button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ ...S.section, background: "#1e2e1e", borderRadius: 12, padding: 16 }}>
+            <h3 style={{ ...S.sectionTitle, marginTop: 0 }}><Icon name="archive" size={16} color="#c8a96e" /> Google Drive</h3>
+            <p style={{ color: "#9aaa9a", fontSize: 13, lineHeight: 1.5 }}>
+              İndirilen Excel dosyalarını telefonunuzdaki Google Drive uygulamasına yükleyebilirsiniz.
+              "Paylaş" butonunu kullanarak doğrudan Drive'a gönderebilirsiniz.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════ STYLES ═══════════════════════
+    const S = {
+      app: { maxWidth: 480, margin: "0 auto", height: "100%", background: "#141e14", position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" },
+      loadingScreen: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh", background: "#141e14" },
+      header: { display: "flex", alignItems: "center", padding: "14px 16px", background: "#1a2a1a", borderBottom: "1px solid #2a3a2a", position: "sticky", top: 0, zIndex: 10, gap: 8, flexShrink: 0 },
+      backBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex" },
+      headerTitle: { display: "flex", alignItems: "center", gap: 8 },
+      headerText: { fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 600, color: "#c8a96e" },
+      main: { flex: 1, overflowY: "auto", paddingBottom: 72 },
+      viewContainer: { padding: 16 },
+      bottomNav: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, display: "flex", justifyContent: "space-around", background: "#1a2a1a", borderTop: "1px solid #2a3a2a", padding: "6px 0 10px 0", zIndex: 10 },
+      navBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2, background: "none", border: "none", cursor: "pointer", padding: "4px 8px" },
+      navBtnActive: {},
+      navLabel: { fontSize: 10, fontWeight: 500 },
+      toast: { position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", display: "flex", alignItems: "center", gap: 8, padding: "10px 20px", borderRadius: 8, color: "#e8dcc8", fontSize: 14, zIndex: 100, boxShadow: "0 4px 20px rgba(0,0,0,0.4)", whiteSpace: "nowrap" },
+      welcomeBanner: { background: "linear-gradient(135deg, #2a4a2a, #1a3a2a)", borderRadius: 16, padding: "28px 20px", marginBottom: 20, textAlign: "center" },
+      welcomeTitle: { fontFamily: "'Playfair Display', serif", fontSize: 26, color: "#c8a96e", margin: 0, fontWeight: 700 },
+      welcomeSub: { color: "#9aaa9a", fontSize: 14, margin: "6px 0 0 0" },
+      statsGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 },
+      statCard: { background: "#1a2a1a", borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, border: "1px solid #2a3a2a" },
+      statValue: { fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif", color: "#e8dcc8" },
+      statLabel: { fontSize: 11, color: "#7a8a7a", textTransform: "uppercase", letterSpacing: 0.5 },
+      quickActions: { marginBottom: 20 },
+      sectionTitle: { fontFamily: "'Playfair Display', serif", fontSize: 16, color: "#c8a96e", margin: "0 0 12px 0", display: "flex", alignItems: "center", gap: 6 },
+      actionGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+      actionBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: 16, borderRadius: 12, border: "none", cursor: "pointer" },
+      actionLabel: { color: "#e8dcc8", fontSize: 13 },
+      section: { marginBottom: 20 },
+      lendingCard: { background: "#1a2a1a", borderRadius: 8, padding: "10px 14px", marginBottom: 8 },
+      lendBookName: { display: "block", fontSize: 14, fontWeight: 600, color: "#e8dcc8" },
+      lendBorrower: { display: "block", fontSize: 12, color: "#7a8a7a", marginTop: 2 },
+      searchBox: { display: "flex", alignItems: "center", gap: 8, background: "#1a2a1a", borderRadius: 10, padding: "10px 14px", marginBottom: 10, border: "1px solid #2a3a2a" },
+      searchInput: { flex: 1, background: "none", border: "none", outline: "none", color: "#e8dcc8", fontSize: 15 },
+      clearBtn: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: 2 },
+      qrScanBtn: { background: "#2a3a2a", border: "1px solid #3a4a3a", borderRadius: 8, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
+      filterRow: { display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" },
+      filterChip: { background: "#1a2a1a", border: "1px solid #2a3a2a", borderRadius: 16, padding: "4px 12px", color: "#7a8a7a", fontSize: 12, cursor: "pointer" },
+      filterChipActive: { background: "#2a4a2a", borderColor: "#c8a96e", color: "#c8a96e" },
+      resultCount: { color: "#5a6a5a", fontSize: 12, marginBottom: 10 },
+      emptyState: { display: "flex", flexDirection: "column", alignItems: "center", padding: 40, gap: 12, color: "#5a6a5a" },
+      bookList: { display: "flex", flexDirection: "column", gap: 8 },
+      bookCard: { display: "flex", alignItems: "center", gap: 12, background: "#1a2a1a", borderRadius: 10, padding: 12, cursor: "pointer", border: "1px solid #2a3a2a" },
+      bookThumb: { width: 52, height: 68, borderRadius: 6, background: "#243424", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 },
+      bookThumbImg: { width: "100%", height: "100%", objectFit: "cover" },
+      bookInfo: { flex: 1, minWidth: 0 },
+      bookName: { display: "block", fontSize: 14, fontWeight: 600, color: "#e8dcc8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+      bookAuthor: { display: "block", fontSize: 12, color: "#9aaa9a", marginTop: 2 },
+      bookMeta: { display: "flex", gap: 10, marginTop: 4 },
+      bookMetaItem: { display: "flex", alignItems: "center", gap: 3, fontSize: 11, color: "#5a6a5a" },
+      lentBadge: { background: "#c8a96e22", color: "#c8a96e", fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600, flexShrink: 0 },
+      photoSection: { display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 20, gap: 12 },
+      photoPreview: { position: "relative", width: 140, height: 180, borderRadius: 10, overflow: "hidden" },
+      photoImg: { width: "100%", height: "100%", objectFit: "cover" },
+      removePhotoBtn: { position: "absolute", top: 6, right: 6, background: "#000000aa", border: "none", borderRadius: 20, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", fontSize: 16 },
+      photoPlaceholder: { width: 140, height: 180, borderRadius: 10, background: "#1a2a1a", border: "2px dashed #2a3a2a", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 },
+      photoBtns: { display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" },
+      photoActionBtn: { display: "flex", alignItems: "center", gap: 6, background: "#2a3a2a", border: "none", borderRadius: 8, padding: "8px 14px", color: "#e8dcc8", fontSize: 13, cursor: "pointer" },
+      formSection: { display: "flex", flexDirection: "column", gap: 14 },
+      formGroup: { display: "flex", flexDirection: "column", gap: 5 },
+      formLabel: { fontSize: 12, color: "#9aaa9a", display: "flex", alignItems: "center", gap: 5, fontWeight: 500 },
+      formInput: { background: "#1a2a1a", border: "1px solid #2a3a2a", borderRadius: 8, padding: "10px 12px", color: "#e8dcc8", fontSize: 14, outline: "none", width: "100%", boxSizing: "border-box" },
+      saveBtn: { background: "#2d5a2d", border: "none", borderRadius: 10, padding: "14px 24px", color: "#e8dcc8", fontSize: 15, fontWeight: 600, cursor: "pointer", marginTop: 16, width: "100%" },
+      detailPhoto: { display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 16, gap: 8 },
+      detailPhotoImg: { width: 160, height: 220, objectFit: "cover", borderRadius: 10, boxShadow: "0 4px 20px rgba(0,0,0,0.3)" },
+      detailPhotoPlaceholder: { width: 160, height: 220, borderRadius: 10, background: "#1a2a1a", display: "flex", alignItems: "center", justifyContent: "center" },
+      updatePhotoBtn: { display: "flex", alignItems: "center", gap: 4, background: "none", border: "1px solid #2a3a2a", borderRadius: 6, padding: "4px 12px", color: "#9aaa9a", fontSize: 12, cursor: "pointer" },
+      detailTitle: { fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 700, color: "#e8dcc8", margin: "0 0 4px 0" },
+      detailAuthor: { color: "#c8a96e", fontSize: 15, margin: "0 0 16px 0" },
+      detailGrid: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 },
+      detailRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: "#1a2a1a", borderRadius: 8 },
+      detailLabel: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#7a8a7a" },
+      detailValue: { fontSize: 14, fontWeight: 500, color: "#e8dcc8" },
+      qrSection: { marginBottom: 20 },
+      qrBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 8, background: "#fff", borderRadius: 12, padding: 16, width: "fit-content", margin: "0 auto" },
+      qrId: { fontSize: 13, fontWeight: 600, color: "#1a2e1a", fontFamily: "monospace" },
+      lendingStatus: { background: "#1a2a1a", borderRadius: 10, padding: 14, marginBottom: 16, border: "1px solid #c8a96e33", display: "flex", flexDirection: "column", gap: 6 },
+      lentStatusText: { display: "flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 600, color: "#e8dcc8" },
+      lentStatusDate: { fontSize: 13, color: "#9aaa9a" },
+      returnBtn: { background: "#4a9e6e", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 13, cursor: "pointer", marginTop: 4, fontWeight: 600 },
+      lendBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "#c8a96e22", border: "1px solid #c8a96e44", borderRadius: 10, padding: 12, color: "#c8a96e", fontSize: 14, cursor: "pointer", width: "100%", marginBottom: 16 },
+      lendFormBox: { background: "#1a2a1a", borderRadius: 10, padding: 16, marginBottom: 16, border: "1px solid #2a3a2a", display: "flex", flexDirection: "column", gap: 10 },
+      detailActions: { display: "flex", gap: 10, marginTop: 8 },
+      editBtn: { display: "flex", alignItems: "center", gap: 6, flex: 1, justifyContent: "center", background: "#2a3a4a", border: "none", borderRadius: 8, padding: "10px 16px", color: "#e8dcc8", fontSize: 13, cursor: "pointer" },
+      deleteBtn: { display: "flex", alignItems: "center", gap: 6, flex: 1, justifyContent: "center", background: "#4a2a2a", border: "none", borderRadius: 8, padding: "10px 16px", color: "#e8dcc8", fontSize: 13, cursor: "pointer" },
+      tabRow: { display: "flex", gap: 8, marginBottom: 16 },
+      tab: { flex: 1, padding: "10px 0", background: "#1a2a1a", border: "1px solid #2a3a2a", borderRadius: 8, color: "#7a8a7a", fontSize: 13, cursor: "pointer", textAlign: "center" },
+      tabActive: { background: "#2a4a2a", borderColor: "#c8a96e", color: "#c8a96e" },
+      lendingDetailCard: { background: "#1a2a1a", borderRadius: 10, padding: 14, marginBottom: 10, display: "flex", flexDirection: "column", gap: 4 },
+      lendingCardTop: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+      lendBookTitle: { fontSize: 14, fontWeight: 600, color: "#e8dcc8" },
+      overdueBadge: { background: "#c45c5c33", color: "#c45c5c", fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 700 },
+      returnedBadge: { background: "#4a9e6e33", color: "#4a9e6e", fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 700 },
+      lendingMeta: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#7a8a7a" },
+      excelBtn: { display: "flex", alignItems: "center", gap: 8, background: "#2a3a2a", border: "none", borderRadius: 10, padding: "12px 16px", color: "#e8dcc8", fontSize: 14, cursor: "pointer", width: "100%" },
+      previewRow: { background: "#1e2e1e", borderRadius: 6, padding: "8px 12px", marginBottom: 4 },
+      previewName: { display: "block", fontSize: 13, fontWeight: 600, color: "#e8dcc8" },
+      previewMeta: { display: "block", fontSize: 11, color: "#7a8a7a" },
+    };
+
+    // ─── Mount ───
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+
+  <!-- Service Worker Registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(reg => console.log('SW registered:', reg.scope))
+          .catch(err => console.log('SW registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
